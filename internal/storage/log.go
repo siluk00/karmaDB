@@ -6,14 +6,17 @@ import (
 	"os"
 )
 
+// interface for Writing and logging events
 type TransactionLogger interface {
 	WriteDelete(key string)
 	WritePut(key, value string)
 	Err() <-chan error
 	ReadEvents() (<-chan Event, <-chan error)
 	Run()
+	Close() error
 }
 
+// event struct for Event tracking
 type Event struct {
 	Sequence uint64
 	EventType
@@ -29,6 +32,7 @@ const (
 	EventPut
 )
 
+// struct that implements the TransactionLogger interface
 type FileTransactionLogger struct {
 	events       chan<- Event
 	errors       <-chan error
@@ -36,10 +40,12 @@ type FileTransactionLogger struct {
 	file         *os.File
 }
 
+// Sends put event to log
 func (l *FileTransactionLogger) WritePut(key, value string) {
 	l.events <- Event{EventType: EventPut, Key: key, Value: value}
 }
 
+// Sends delete event to log
 func (l *FileTransactionLogger) WriteDelete(key string) {
 	l.events <- Event{EventType: EventDelete, Key: key}
 }
@@ -48,15 +54,7 @@ func (l *FileTransactionLogger) Err() <-chan error {
 	return l.errors
 }
 
-func NewFileTransctionLogger(filename string) (TransactionLogger, error) {
-	file, err := os.OpenFile(filename, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0755)
-	if err != nil {
-		return nil, fmt.Errorf("cannot open transaction log file %s", err)
-	}
-
-	return &FileTransactionLogger{file: file}, nil
-}
-
+// Creates and appends the channels to the TransactionLogger, calls a goroutine that runs the log
 func (l *FileTransactionLogger) Run() {
 	events := make(chan Event, 16)
 	l.events = events
@@ -78,6 +76,7 @@ func (l *FileTransactionLogger) Run() {
 	}()
 }
 
+// ReadEvents builds two channels for reading the log file and returns them, then writes to the channel
 func (l *FileTransactionLogger) ReadEvents() (<-chan Event, <-chan error) {
 	scanner := bufio.NewScanner(l.file)
 	outEvent := make(chan Event)
@@ -92,7 +91,7 @@ func (l *FileTransactionLogger) ReadEvents() (<-chan Event, <-chan error) {
 		for scanner.Scan() {
 			line := scanner.Text()
 
-			if _, err := fmt.Sscanf(line, "%d\t%d\t%s\t%s", &e.Sequence, &e.EventType, &e.Key, &e.Value); err != nil {
+			if _, err := fmt.Sscanf(line, "%d\t%d\t%s\t%s\n", &e.Sequence, &e.EventType, &e.Key, &e.Value); err != nil {
 				outError <- fmt.Errorf("input parse error: %w", err)
 				return
 			}
@@ -116,35 +115,20 @@ func (l *FileTransactionLogger) ReadEvents() (<-chan Event, <-chan error) {
 	return outEvent, outError
 }
 
-var logger TransactionLogger
+func (l *FileTransactionLogger) Close() error {
+	if l.events != nil {
+		close(l.events)
+	}
+	l.file.Sync()
+	return l.file.Close()
+}
 
-func initializeTransactionLogger() error {
-	var err error
-
-	logger, err = NewFileTransctionLogger("transaction.log")
+// Appends the file in filename to a new FileTransactionLogger
+func NewFileTransctionLogger(filename string) (TransactionLogger, error) {
+	file, err := os.OpenFile(filename, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0755)
 	if err != nil {
-		return fmt.Errorf("filed to create event logger: %w", err)
+		return nil, fmt.Errorf("cannot open transaction log file %s", err)
 	}
 
-	events, errors := logger.ReadEvents()
-
-	e := Event{}
-	ok := true
-
-	for ok && err == nil {
-		select {
-		case err, ok = <-errors:
-		case e, ok = <-events:
-			switch e.EventType {
-			case EventDelete:
-				err = Delete(e.Key)
-			case EventPut:
-				err = Put(e.Key, e.Value)
-			}
-		}
-	}
-
-	logger.Run()
-
-	return err
+	return &FileTransactionLogger{file: file}, nil
 }

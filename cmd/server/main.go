@@ -1,19 +1,43 @@
 package main
 
 import (
+	"fmt"
 	"log"
-	"net/http"
 
-	"github.com/gorilla/mux"
 	"github.com/siluk00/karmaDB/internal/api/server"
+	"github.com/siluk00/karmaDB/internal/storage"
 )
 
 func main() {
-	r := mux.NewRouter()
+	srv := server.NewHTTPServer(":8080")
+	log.Fatal(srv.ListenAndServe())
+}
 
-	r.HandleFunc("/v1/key/{key}", server.PutHandler).Methods("PUT")
-	r.HandleFunc("/v1/key/{key}", server.GetHandler).Methods("GET")
+func initializeTransactionLogger(filename string) (storage.TransactionLogger, error) {
 
-	log.Fatal(http.ListenAndServe(":8080", r))
+	logger, err := storage.NewFileTransctionLogger(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create event logger: %w", err)
+	}
 
+	events, errors := logger.ReadEvents()
+
+	e := storage.Event{}
+	ok := true
+
+	for ok && err == nil {
+		select {
+		case err, ok = <-errors:
+		case e, ok = <-events:
+			switch e.EventType {
+			case storage.EventDelete:
+				err = storage.Delete(e.Key)
+			case storage.EventPut:
+				err = storage.Put(e.Key, e.Value)
+			}
+		}
+	}
+	logger.Run()
+
+	return logger, err
 }
